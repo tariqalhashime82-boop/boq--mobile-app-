@@ -199,7 +199,7 @@ def extract_boq(file_bytes, filename, api_key):
         if col not in df.columns:
             df[col] = 0.0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", x.split(".")) or x)
+    df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", str(x).split(".")[0]) or str(x))
     df = df[df["description"].str.len() > 2].reset_index(drop=True)
     if (df["item_no"] != "").sum() > 2:
         df = df[df["item_no"] != ""].drop_duplicates(subset=["item_no"], keep="first").reset_index(drop=True)
