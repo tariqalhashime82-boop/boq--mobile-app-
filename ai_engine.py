@@ -7,7 +7,17 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 HOST = "generativelanguage." + "googleapis.com"
-MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+def _get_models(api_key):
+    try:
+        r = requests.get(f"https://{HOST}/v1beta/models?key={api_key.strip()}", timeout=15)
+        if r.status_code == 200:
+            ms = [m["name"].replace("models/", "") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", []) and "flash" in m.get("name", "")]
+            if ms:
+                return ms[:4]
+    except Exception:
+        pass
+    return ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-3-flash-preview"]
 
 SYNONYMS = {
     "موزايكو": "تيرازو", "موزايك": "تيرازو", "لياسة": "بياض", "قصارة": "بياض",
@@ -39,7 +49,16 @@ def norm_unit(u):
     if any(k in s for k in ["ق", "ls", "مقطوع"]):
         return "م.ق"
     return s if s else "عدد"
-
+def _get_models(api_key):
+    try:
+        r = requests.get(f"https://{HOST}/v1beta/models?key={api_key.strip()}", timeout=15)
+        if r.status_code == 200:
+            ms = [m["name"].replace("models/", "") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", []) and "flash" in m.get("name", "")]
+            if ms:
+                return ms[:4]
+    except Exception:
+        pass
+    return ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-3-flash-preview"]
 def _parse_image_gemini(args):
     idx, img_bytes, api_key = args
     b64 = base64.b64encode(img_bytes).decode("utf-8")
@@ -49,7 +68,7 @@ def _parse_image_gemini(args):
         "generationConfig": {"response_mime_type": "application/json", "temperature": 0.0}
     }
     last_err = ""
-    for mdl in MODELS:
+    for mdl in _get_models(api_key):
         endpoint = f"https://{HOST}/v1beta/models/{mdl}:generateContent"
         try:
             r = requests.post(endpoint, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=50)
