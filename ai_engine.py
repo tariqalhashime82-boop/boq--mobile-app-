@@ -8,23 +8,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 HOST = "generativelanguage." + "googleapis.com"
 
-def _get_models(api_key):
-    try:
-        r = requests.get(f"https://{HOST}/v1beta/models?key={api_key.strip()}", timeout=15)
-        if r.status_code == 200:
-            ms = [m["name"].replace("models/", "") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", []) and "flash" in m.get("name", "")]
-            if ms:
-                return ms[:4]
-    except Exception:
-        pass
-    return ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-3-flash-preview"]
-
 SYNONYMS = {
     "موزايكو": "تيرازو", "موزايك": "تيرازو", "لياسة": "بياض", "قصارة": "بياض",
     "سملات": "ميدة", "شناجات": "ميدة", "رقاب": "أعمدة", "شمعات": "أعمدة",
     "بلوك": "طوب", "ياجور": "طوب", "ممبرين": "لفافات بيتومين", "زفت": "بيتومين",
     "فلين": "بوليسترين", "بولي سترين": "بوليسترين", "صوف صخري": "عزل حراري",
-    "حلق": "إطار", "درفة": "ضلفة", "ردم": "دفان", "انابيب": "مواسير"
+    "حلق": "إطار", "درفة": "ضلفة", "ردم": "دفان", "انابيب": "مواسير",
+    "بلاط": "ارضيات", "سيراميك": "ارضيات", "بورسلين": "ارضيات"
 }
 
 def clean_ar(text):
@@ -49,6 +39,27 @@ def norm_unit(u):
     if any(k in s for k in ["ق", "ls", "مقطوع"]):
         return "م.ق"
     return s if s else "عدد"
+
+def classify_work_group(desc):
+    d = clean_ar(desc)
+    if any(k in d for k in ["ازاله", "حفر", "ردم", "دفان", "احلال", "تسويه", "تمهيد"]):
+        return "1. الأعمال التمهيدية والحفر والردم"
+    if any(k in d for k in ["خرسانه", "اساسات", "قواعد", "ميده", "اعمده", "اسقف", "كمرات", "حديد", "شدة"]):
+        return "2. أعمال الخرسانات العادية والمسلحة"
+    if any(k in d for k in ["طوب", "مباني", "بلوك", "حوائط", "قواطيع"]):
+        return "3. أعمال المباني"
+    if any(k in d for k in ["عزل", "بيتومين", "لفافات", "بوليسترين", "رطوبه", "حراري"]):
+        return "4. أعمال العزل المائي والحراري"
+    if any(k in d for k in ["بياض", "لياسه", "دهان", "طلاء", "ارضيات", "بلاط", "سيراميك", "تيرازو", "رخام", "جبس"]):
+        return "5. أعمال البياض والأرضيات والدهانات"
+    if any(k in d for k in ["ابواب", "نوافذ", "الومنيوم", "خشب", "حديد مشغول", "حمايه", "درابزين"]):
+        return "6. أعمال النجارة والألومنيوم والحديد"
+    if any(k in d for k in ["مواسير", "صحي", "سباكه", "خزان", "صرف", "تغذيه", "مرحاض", "مغسله", "مضخه"]):
+        return "7. الأعمال الصحية والسباكة"
+    if any(k in d for k in ["كهرباء", "كابل", "اسلاك", "اناره", "لوحه", "مفتاح", "بريزه", "تكييف"]):
+        return "8. الأعمال الكهربائية والميكانيكية"
+    return "9. أعمال متنوعة وتكميلية"
+
 def _get_models(api_key):
     try:
         r = requests.get(f"https://{HOST}/v1beta/models?key={api_key.strip()}", timeout=15)
@@ -63,7 +74,7 @@ def _get_models(api_key):
 def _parse_image_gemini(args):
     idx, img_bytes, api_key = args
     b64 = base64.b64encode(img_bytes).decode("utf-8")
-    prompt = 'Extract all BOQ table rows from this page accurately including handwritten prices. Return JSON only: {"rows": [{"no": "1", "desc": "item description in Arabic", "unit": "m2", "qty": 100, "price": 50, "total": 5000}]}'
+    prompt = 'Extract all BOQ table rows from this page accurately including handwritten prices. Ignore sub-total or grand-total summary rows. Return JSON only: {"rows": [{"no": "1", "desc": "item description in Arabic", "unit": "m2", "qty": 100, "price": 50, "total": 5000}]}'
     payload = {
         "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
         "generationConfig": {"response_mime_type": "application/json", "temperature": 0.0}
@@ -77,9 +88,9 @@ def _parse_image_gemini(args):
                 if r.status_code == 200:
                     cands = r.json().get("candidates", [])
                     if cands:
-                        parts = cands[0].get("content", {}).get("parts", [])
+                        parts = cands.get("content", {}).get("parts", [])
                         if parts:
-                            data = json.loads(parts[0].get("text", "{}"))
+                            data = json.loads(parts.get("text", "{}"))
                             rows = data if isinstance(data, list) else next((v for v in data.values() if isinstance(v, list)), [])
                             if rows:
                                 return rows
@@ -101,6 +112,7 @@ def _parse_image_gemini(args):
     if last_err:
         raise ValueError(last_err)
     return []
+
 def _read_word_tables(file_bytes):
     from docx import Document
     doc = Document(io.BytesIO(file_bytes))
@@ -112,14 +124,15 @@ def _read_word_tables(file_bytes):
     header = (header + [f"col_{i}" for i in range(mc)])[:mc]
     return pd.DataFrame([(r + [""] * mc)[:mc] for r in data], columns=header)
 
-def _read_excel_all_sheets(file_bytes):
+def read_excel_all_sheets(file_bytes):
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
     frames = []
     for sh in xl.sheet_names:
-        sub = xl.parse(sh).dropna(how="all")
+        sub = xl.parse(sh, header=None).dropna(how="all")
         if not sub.empty and len(sub.columns) >= 2:
-            sub.columns = [f"c_{j}" for j in range(len(sub.columns))]
-            frames.append(sub)
+            sub = _smart_map_columns(sub)
+            if not sub.empty:
+                frames.append(sub)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 def _smart_map_columns(df):
@@ -163,9 +176,10 @@ def _smart_map_columns(df):
 
 def extract_boq(file_bytes, filename, api_key):
     ext = filename.lower().split(".")[-1]
-    if ext in ["xlsx", "xls", "docx"]:
-        raw = _read_excel_all_sheets(file_bytes) if ext in ["xlsx", "xls"] else _read_word_tables(file_bytes)
-        df = _smart_map_columns(raw)
+    if ext in ["xlsx", "xls"]:
+        df = read_excel_all_sheets(file_bytes)
+    elif ext == "docx":
+        df = _smart_map_columns(_read_word_tables(file_bytes))
     else:
         images = []
         if ext == "pdf":
@@ -187,86 +201,3 @@ def extract_boq(file_bytes, filename, api_key):
             images.append((0, buf.getvalue(), api_key))
         rows = []
         with ThreadPoolExecutor(max_workers=3) as ex:
-            for res in ex.map(_parse_image_gemini, images):
-                if res:
-                    rows.extend(res)
-        df = pd.DataFrame(rows).rename(columns={"no": "item_no", "desc": "description", "price": "unit_price", "total": "total_price"})
-    for col in ["item_no", "description", "unit"]:
-        if col not in df.columns:
-            df[col] = ""
-        df[col] = df[col].fillna("").astype(str).str.strip()
-    for col in ["qty", "unit_price", "total_price"]:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", str(x).split(".")[0]) or str(x))
-    df = df[df["description"].str.len() > 2].reset_index(drop=True)
-    if (df["item_no"] != "").sum() > 2:
-        df = df[df["item_no"] != ""].drop_duplicates(subset=["item_no"], keep="first").reset_index(drop=True)
-    df["unit"] = df["unit"].apply(norm_unit)
-    df["calc_total"] = (df["qty"] * df["unit_price"]).round(2)
-    df["math_diff"] = (df["total_price"] - df["calc_total"]).round(2)
-    return df
-
-def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
-    cols = ["item_no", "description", "unit", "qty", "unit_price", "total_price", "calc_total", "math_diff", "سعر اللائحة", "اللائحة + العلاوة", "إجمالي اللائحة", "الفرق (د.ل)", "نسبة الفرق %", "البند المطابق باللائحة"]
-    if offer_df is None or offer_df.empty:
-        return pd.DataFrame(columns=cols)
-    guide_df = _smart_map_columns(guide_df.copy())
-    desc_col = "description" if "description" in guide_df.columns else guide_df.columns
-    g_descs = guide_df[desc_col].fillna("").astype(str).tolist()
-    g_clean = [clean_ar(d) for d in g_descs]
-    p_col = "price" if "price" in guide_df.columns else ("unit_price" if "unit_price" in guide_df.columns else guide_df.columns[-1])
-    g_prices = pd.to_numeric(guide_df[p_col], errors="coerce").fillna(0.0).tolist()
-    g_units = [norm_unit(u) for u in guide_df["unit"].fillna("").astype(str).tolist()] if "unit" in guide_df.columns else [""] * len(g_descs)
-    rc_m3 = next((p for d, p, u in zip(g_clean, g_prices, g_units) if u == "م3" and "خرسانه مسلحه" in d and p > 150), 280.0)
-    exc_m3 = next((p for d, p, u in zip(g_clean, g_prices, g_units) if u == "م3" and "حفر" in d and 5 <= p <= 50), 15.0)
-    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
-    g_mat = vec.fit_transform(g_clean)
-    try:
-        sims = cosine_similarity(vec.transform([clean_ar(d) or "بند" for d in offer_df["description"].tolist()]), g_mat)
-    except Exception:
-        sims = np.zeros((len(offer_df), len(g_clean)))
-    mult = 1.0 + (allowance_pct / 100.0)
-    gb, ga, gt, dt, dp, mt = [], [], [], [], [], []
-    for i, r in offer_df.iterrows():
-        desc, u, qty, up, tp = r["description"], r["unit"], r["qty"], r["unit_price"], r["calc_total"]
-        gp, gm = 0.0, ""
-        if (u == "م.ق" or "مقطوع" in desc) and any(k in desc for k in ["خزان", "حوض", "بيارة"]):
-            nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", desc) if 0.5 <= float(x) <= 25.0]
-            if len(nums) >= 3:
-                L, W, H = nums[0], nums[1], nums[2]
-                t = 0.25
-                cv = round((L + 2*t)*(W + 2*t)*(2*t) + 2*(L + W + 2*t)*H*t, 2)
-                ev = round((L + 1.0)*(W + 1.0)*(H + 0.5), 2)
-                gp = round((cv * rc_m3) + (ev * exc_m3), 2)
-                gm = f"حساب خرسانة الخزان ({cv} م3 × {rc_m3} + حفر)"
-        if gp == 0.0:
-            rs = sims[i].copy()
-            for j in range(len(rs)):
-                if g_units[j] and u and g_units[j] != u:
-                    rs[j] *= 0.40
-            bj = int(np.argmax(rs))
-            if rs[bj] >= 0.16 and g_prices[bj] > 0:
-                gp = round(g_prices[bj], 2)
-                gm = f"{g_descs[bj][:45]} ({int(rs[bj]*100)}%)"
-        if gp == 0.0 and up > 0:
-            gp = round(up * 0.92, 2)
-            gm = "تقدير سوق محلي"
-        gpa = round(gp * mult, 2)
-        g_tot = round(gpa * qty, 2)
-        d_tot = round(tp - g_tot, 2)
-        gb.append(gp)
-        ga.append(gpa)
-        gt.append(g_tot)
-        dt.append(d_tot)
-        dp.append(round((d_tot / g_tot * 100), 1) if g_tot > 0 else 0.0)
-        mt.append(gm)
-    out = offer_df.copy()
-    out["سعر اللائحة"] = gb
-    out["اللائحة + العلاوة"] = ga
-    out["إجمالي اللائحة"] = gt
-    out["الفرق (د.ل)"] = dt
-    out["نسبة الفرق %"] = dp
-    out["البند المطابق باللائحة"] = mt
-    return out
