@@ -79,37 +79,41 @@ def _read_word_tables(file_bytes):
 
 def _smart_map_columns(df):
     df = df.dropna(how="all").reset_index(drop=True)
-    # البحث عن صف العناوين الحقيقي إذا كانت الصفوف الأولى عنواناً للمشروع
-    for idx in range(min(10, len(df))):
+    if df.empty:
+        return pd.DataFrame(columns=["item_no", "description", "unit", "qty", "unit_price", "total_price"])
+
+    for idx in range(min(25, len(df))):
         row_str = " ".join(df.iloc[idx].fillna("").astype(str).tolist())
-        if any(w in row_str for w in ["بيان", "وصف", "الأعمال", "الاعمال", "البند", "السعر", "الفئة"]):
-            df.columns = [str(c).strip() for c in df.iloc[idx].tolist()]
+        if any(w in row_str for w in ["بيان", "وصف", "الأعمال", "الاعمال", "البند", "السعر", "الفئة", "مواصفات"]):
+            new_cols = [str(c).strip() or f"col_{j}" for j, c in enumerate(df.iloc[idx].tolist())]
+            # ضمان عدم تكرار أسماء الأعمدة
+            seen = {}
+            unique_cols = []
+            for c in new_cols:
+                seen[c] = seen.get(c, 0) + 1
+                unique_cols.append(c if seen[c] == 1 else f"{c}_{seen[c]}")
+            df.columns = unique_cols
             df = df.iloc[idx + 1:].reset_index(drop=True)
             break
 
     df.columns = [str(c).strip() for c in df.columns]
     cm = {}
     for c in df.columns:
-        if any(k in c for k in ["رقم", "م", "no", "كود"]) and "description" not in cm.values(): cm[c] = "item_no"
-        elif any(k in c for k in ["بيان", "وصف", "بند", "اعمال", "أعمال", "مواصف", "desc"]): cm[c] = "description"
-        elif any(k in c for k in ["وحدة", "وحده", "unit"]): cm[c] = "unit"
-        elif any(k in c for k in ["كمية", "كميه", "qty"]): cm[c] = "qty"
-        elif any(k in c for k in ["فئة", "فئه", "سعر", "price"]) and "اجمالي" not in c and "إجمالي" not in c: cm[c] = "unit_price"
-        elif any(k in c for k in ["اجمالي", "إجمالي", "قيمة", "قيمه", "total"]): cm[c] = "total_price"
+        if any(k in c for k in ["رقم", "م", "no", "كود"]) and "item_no" not in cm.values(): cm[c] = "item_no"
+        elif any(k in c for k in ["بيان", "وصف", "بند", "اعمال", "أعمال", "مواصف", "desc"]) and "description" not in cm.values(): cm[c] = "description"
+        elif any(k in c for k in ["وحدة", "وحده", "unit"]) and "unit" not in cm.values(): cm[c] = "unit"
+        elif any(k in c for k in ["كمية", "كميه", "qty"]) and "qty" not in cm.values(): cm[c] = "qty"
+        elif any(k in c for k in ["فئة", "فئه", "سعر", "price"]) and "اجمالي" not in c and "إجمالي" not in c and "unit_price" not in cm.values(): cm[c] = "unit_price"
+        elif any(k in c for k in ["اجمالي", "إجمالي", "قيمة", "قيمه", "total"]) and "total_price" not in cm.values(): cm[c] = "total_price"
     df = df.rename(columns=cm)
 
-    # احتياطي ذكي: إذا لم يُكتشف عمود الوصف أو السعر بالاسم، يكتشفه تلقائياً من نوع البيانات
     if "description" not in df.columns:
-        text_cols = [c for c in df.columns if df[c].astype(str).str.len().mean() > 12]
-        if text_cols:
-            df = df.rename(columns={max(text_cols, key=lambda c: df[c].astype(str).str.len().mean()): "description"})
-        else:
-            df["description"] = df.iloc[:, min(1, len(df.columns)-1)].astype(str)
+        best_c = max(df.columns, key=lambda c: df[c].fillna("").astype(str).str.len().mean())
+        df = df.rename(columns={best_c: "description"})
 
     if "unit_price" not in df.columns and "price" not in df.columns:
-        num_cols = [c for c in df.columns if pd.to_numeric(df[c], errors="coerce").notna().sum() > len(df) * 0.3]
-        if num_cols:
-            df["unit_price"] = pd.to_numeric(df[num_cols[-1]], errors="coerce").fillna(0.0)
+        num_cols = [c for c in df.columns if c != "description" and pd.to_numeric(df[c], errors="coerce").notna().sum() > len(df) * 0.2]
+        df["unit_price"] = pd.to_numeric(df[num_cols[-1]], errors="coerce").fillna(0.0) if num_cols else 0.0
     return df
 
 def extract_boq(file_bytes, filename, api_key):
@@ -162,7 +166,8 @@ def extract_boq(file_bytes, filename, api_key):
 
 def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
     guide_df = _smart_map_columns(guide_df.copy())
-    g_descs = guide_df["description"].fillna("").astype(str).tolist()
+    desc_col = "description" if "description" in guide_df.columns else guide_df.columns[0]
+    g_descs = guide_df[desc_col].fillna("").astype(str).tolist()
     g_clean = [clean_ar(d) for d in g_descs]
     p_col = "price" if "price" in guide_df.columns else ("unit_price" if "unit_price" in guide_df.columns else guide_df.columns[-1])
     g_prices = pd.to_numeric(guide_df[p_col], errors="coerce").fillna(0.0).tolist()
@@ -188,13 +193,3 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
                 cv = round((L + 2*t)*(W + 2*t)*(2*t) + 2*(L + W + 2*t)*H*t, 2)
                 ev = round((L + 1.0)*(W + 1.0)*(H + 0.5), 2)
                 gp = round((cv * rc_m3) + (ev * exc_m3), 2)
-                gm = f"حساب خرسانة الخزان ({cv} م3 × {rc_m3} + حفر)"
-
-        if gp == 0.0:
-            rs = sims[i].copy()
-            for j in range(len(rs)):
-                if g_units[j] and u and g_units[j] != u:
-                    rs[j] *= 0.40
-            bj = int(np.argmax(rs))
-            if rs[bj] >= 0.16 and g_prices[bj] > 0:
-                gp = round(g_prices[bj], 2)
