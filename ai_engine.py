@@ -82,7 +82,7 @@ def _parse_image_gemini(args):
                         if rows:
                             return rows
                         last_err = f"النموذج {mdl} لم يجد جدولاً في الصفحة"
-            elif r.status_code in (400, 404):
+            elif r.status_code in (400, 404, 503):
                 last_err = f"النموذج {mdl} غير متاح (404)"
                 continue
             elif r.status_code == 429:
