@@ -53,7 +53,7 @@ def _get_models(api_key):
     try:
         r = requests.get(f"https://{HOST}/v1beta/models?key={api_key.strip()}", timeout=15)
         if r.status_code == 200:
-            ms = [m["name"].replace("models/", "") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", []) and "flash" in m.get("name", "")]
+            ms = [m["name"].replace("models/", "") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", []) and "flash" in m.get("name", "") and not any(x in m.get("name", "") for x in ["tts", "audio", "image", "robotics"])]
             if ms:
                 return ms[:4]
     except Exception:
@@ -82,7 +82,7 @@ def _parse_image_gemini(args):
                         if rows:
                             return rows
                         last_err = f"النموذج {mdl} لم يجد جدولاً في الصفحة"
-            elif r.status_code == 404:
+            elif r.status_code in (400, 404):
                 last_err = f"النموذج {mdl} غير متاح (404)"
                 continue
             elif r.status_code == 429:
