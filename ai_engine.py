@@ -52,27 +52,31 @@ def _parse_image_gemini(args):
     for mdl in MODELS:
         endpoint = f"https://{HOST}/v1beta/models/{mdl}:generateContent"
         try:
-            r = requests.post(endpoint, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=45)
+            r = requests.post(endpoint, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=50)
             if r.status_code == 200:
                 cands = r.json().get("candidates", [])
                 if cands:
                     parts = cands[0].get("content", {}).get("parts", [])
                     if parts:
                         data = json.loads(parts[0].get("text", "{}"))
-                        rows = data if isinstance(data, list) else data.get("rows", [])
+                        rows = data if isinstance(data, list) else next((v for v in data.values() if isinstance(v, list)), [])
                         if rows:
                             return rows
+                        last_err = f"النموذج {mdl} لم يجد جدولاً في الصفحة"
             elif r.status_code == 404:
+                last_err = f"النموذج {mdl} غير متاح (404)"
                 continue
             elif r.status_code == 429:
                 last_err = "تجاوز حد الطلبات المجاني (429)، انتظر دقيقة"
-                time.sleep(2.0)
+                time.sleep(3.0)
             else:
                 last_err = f"خطأ ({r.status_code}): {r.text[:140]}"
                 break
         except Exception as e:
             last_err = str(e)
     if last_err:
+        raise ValueError(last_err)
+    return []
         raise ValueError(last_err)
     return []
 
