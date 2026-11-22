@@ -27,28 +27,31 @@ def norm_unit(u):
 def _parse_image_gemini(args):
     idx, img_bytes, api_key = args
     b64 = base64.b64encode(img_bytes).decode("utf-8")
-    prompt = '?????? ???? ???? ???? ??????? ???????? ?? ??? ?????? ???? ???? ?? ????? ????? ??? ??????? ??? ?? ??? ??????? ???????? ??? ????. ???? ??? ???????? ??????? ??? ??????? ???????. ???? JSON ???: {"rows": [{"no": "1", "desc": "???? ???????", "unit": "?2", "qty": 100, "price": 50, "total": 5000}]}'
+    prompt = '?????? ???? ???? ???? ??????? ???????? ?? ??? ?????? ???? ????? ??? ?? ??? ??????? ???????? ??? ????. ???? JSON ???: {"rows": [{"no": "1", "desc": "???? ???????", "unit": "?2", "qty": 100, "price": 50, "total": 5000}]}'
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}], "generationConfig": {"response_mime_type": "application/json", "temperature": 0.0}}
-    for _ in range(4):
+    for _ in range(3):
         try:
-            r = requests.post(GEMINI_URL, headers={"x-goog-api-key": api_key}, json=payload, timeout=30)
+            r = requests.post(GEMINI_URL, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=35)
             if r.status_code == 200:
                 cands = r.json().get("candidates", [])
                 if cands:
-                    parts = cands[0].get("content", {}).get("parts", [])
+                    parts = cands.get("content", {}).get("parts", [])
                     if parts:
-                        rows = json.loads(parts[0].get("text", "{}")).get("rows", [])
+                        data = json.loads(parts.get("text", "{}"))
+                        rows = data if isinstance(data, list) else data.get("rows", [])
                         if rows: return rows
             elif r.status_code == 429: time.sleep(3.0)
+            else: raise RuntimeError(f"Gemini API Error {r.status_code}: {r.text[:150]}")
+        except RuntimeError: raise
         except Exception: time.sleep(1.0)
     return []
 
 def _read_word_tables(file_bytes):
     from docx import Document
     doc = Document(io.BytesIO(file_bytes))
-    all_rows = [[c.text.strip().replace("\n", " ") for c in row.cells] for t in doc.tables for row in t.rows if len(row.cells) >= 4]
+    all_rows = [[c.text.strip().replace("\n", " ") for c in row.cells] for t in doc.tables for row in t.rows if len(row.cells) >= 3]
     if not all_rows: return pd.DataFrame()
-    header, data = all_rows[0], all_rows[1:]
+    header, data = all_rows, all_rows[1:]
     mc = max(len(r) for r in data)
     header = (header + [f"col_{i}" for i in range(mc)])[:mc]
     return pd.DataFrame([(r + [""]*mc)[:mc] for r in data], columns=header)
@@ -126,9 +129,9 @@ def extract_boq(file_bytes, filename, api_key):
     for col in ["qty","unit_price","total_price"]:
         if col not in df.columns: df[col] = 0.0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", x.split(".")[0]) or x)
+    df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", x.split(".")) or x)
     df = df[df["description"].str.len() > 2].reset_index(drop=True)
-    if (df["item_no"] != "").sum() > 0:
+    if (df["item_no"] != "").sum() > 2:
         df = df[df["item_no"] != ""].drop_duplicates(subset=["item_no"], keep="first").reset_index(drop=True)
     df["unit"] = df["unit"].apply(norm_unit)
     df["calc_total"] = (df["qty"] * df["unit_price"]).round(2)
@@ -136,8 +139,11 @@ def extract_boq(file_bytes, filename, api_key):
     return df
 
 def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
+    if offer_df.empty:
+        out = pd.DataFrame(columns=["item_no","description","unit","qty","unit_price","total_price","calc_total","math_diff","??? ???????","??????? + ???????","?????? ???????","????? (?.?)","???? ????? %","????? ??????? ????????"])
+        return out
     guide_df = _smart_map_columns(guide_df.copy())
-    desc_col = "description" if "description" in guide_df.columns else guide_df.columns[0]
+    desc_col = "description" if "description" in guide_df.columns else guide_df.columns
     g_descs = guide_df[desc_col].fillna("").astype(str).tolist()
     g_clean = [clean_ar(d) for d in g_descs]
     p_col = "price" if "price" in guide_df.columns else ("unit_price" if "unit_price" in guide_df.columns else guide_df.columns[-1])
@@ -156,7 +162,7 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
         if (u == "?.?" or "?????" in desc) and any(k in desc for k in ["????","???","?????"]):
             nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", desc) if 0.5 <= float(x) <= 25.0]
             if len(nums) >= 3:
-                L, W, H = nums[0], nums[1], nums[2]; t = 0.25
+                L, W, H = nums, nums, nums; t = 0.25
                 cv = round((L+2*t)*(W+2*t)*(2*t) + 2*(L+W+2*t)*H*t, 2)
                 ev = round((L+1.0)*(W+1.0)*(H+0.5), 2)
                 gp = round((cv * rc_m3) + (ev * exc_m3), 2)
