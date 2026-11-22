@@ -32,8 +32,8 @@ def _parse_image_gemini(args):
     last_err = ""
     for _ in range(3):
         try:
-            url = GEMINI_URL if _ == 0 else GEMINI_URL.replace("gemini-2.5-flash", "gemini-2.0-flash")
-            r = requests.post(url, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=35)
+            url = "https://googleapis.com"
+            r = requests.post("https://googleapis.com", headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=35)
             if r.status_code == 200:
                 cands = r.json().get("candidates", [])
                 if cands:
