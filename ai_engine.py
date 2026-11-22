@@ -88,9 +88,9 @@ def _parse_image_gemini(args):
                 if r.status_code == 200:
                     cands = r.json().get("candidates", [])
                     if cands:
-                        parts = cands.get("content", {}).get("parts", [])
+                        parts = cands[0].get("content", {}).get("parts", [])
                         if parts:
-                            data = json.loads(parts.get("text", "{}"))
+                            data = json.loads(parts[0].get("text", "{}"))
                             rows = data if isinstance(data, list) else next((v for v in data.values() if isinstance(v, list)), [])
                             if rows:
                                 return rows
@@ -119,7 +119,7 @@ def _read_word_tables(file_bytes):
     all_rows = [[c.text.strip().replace("\n", " ") for c in row.cells] for t in doc.tables for row in t.rows if len(row.cells) >= 3]
     if not all_rows:
         return pd.DataFrame()
-    header, data = all_rows, all_rows[1:]
+    header, data = all_rows[0], all_rows[1:]
     mc = max(len(r) for r in data)
     header = (header + [f"col_{i}" for i in range(mc)])[:mc]
     return pd.DataFrame([(r + [""] * mc)[:mc] for r in data], columns=header)
