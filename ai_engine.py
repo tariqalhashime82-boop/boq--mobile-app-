@@ -77,9 +77,6 @@ def _parse_image_gemini(args):
     if last_err:
         raise ValueError(last_err)
     return []
-        raise ValueError(last_err)
-    return []
-
 def _read_word_tables(file_bytes):
     from docx import Document
     doc = Document(io.BytesIO(file_bytes))
