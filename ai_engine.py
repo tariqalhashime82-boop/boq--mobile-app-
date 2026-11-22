@@ -32,7 +32,8 @@ def _parse_image_gemini(args):
     last_err = ""
     for _ in range(3):
         try:
-            r = requests.post(GEMINI_URL, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=35)
+            url = GEMINI_URL if _ == 0 else GEMINI_URL.replace("gemini-2.5-flash", "gemini-2.0-flash")
+            r = requests.post(url, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=35)
             if r.status_code == 200:
                 cands = r.json().get("candidates", [])
                 if cands:
@@ -45,7 +46,7 @@ def _parse_image_gemini(args):
                 last_err = "????? ?? ??????? ??????? (429)? ????? ?????"
                 time.sleep(3.0)
             else:
-                last_err = f"??? ?? ????? API ({r.status_code}): ???? ?? ??? ????? Gemini"
+                last_err = f"??? ({r.status_code}): {r.text[:120]}"
                 break
         except Exception as e:
             last_err = str(e)
