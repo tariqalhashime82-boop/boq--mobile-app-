@@ -20,8 +20,7 @@ def clean_ar(text):
     s = str(text)
     for a, b in [("أ","ا"),("إ","ا"),("آ","ا"),("ة","ه"),("ى","ي")]:
         s = s.replace(a, b)
-    noise = ["بالمتر المربع", "بالمتر الطولي", "بالمتر المكعب", "بالمقطوعية", "توريد وعمل", "توريد وصب", "حسب المواصفات"]
-    for w in noise:
+    for w in ["بالمتر المربع", "بالمتر الطولي", "بالمتر المكعب", "بالمقطوعية", "توريد وعمل", "توريد وصب", "حسب المواصفات"]:
         s = s.replace(w, " ")
     for k, v in SYNONYMS.items():
         if k in s:
@@ -77,6 +76,16 @@ def _read_word_tables(file_bytes):
     header = (header + [f"col_{i}" for i in range(mc)])[:mc]
     return pd.DataFrame([(r + [""] * mc)[:mc] for r in data], columns=header)
 
+def _read_excel_all_sheets(file_bytes):
+    xl = pd.ExcelFile(io.BytesIO(file_bytes))
+    frames = []
+    for sh in xl.sheet_names:
+        sub = xl.parse(sh).dropna(how="all")
+        if not sub.empty and len(sub.columns) >= 2:
+            sub.columns = [f"c_{j}" for j in range(len(sub.columns))]
+            frames.append(sub)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
 def _smart_map_columns(df):
     df = df.dropna(how="all").reset_index(drop=True)
     if df.empty:
@@ -85,13 +94,12 @@ def _smart_map_columns(df):
     for idx in range(min(25, len(df))):
         row_str = " ".join(df.iloc[idx].fillna("").astype(str).tolist())
         if any(w in row_str for w in ["بيان", "وصف", "الأعمال", "الاعمال", "البند", "السعر", "الفئة", "مواصفات"]):
-            new_cols = [str(c).strip() or f"col_{j}" for j, c in enumerate(df.iloc[idx].tolist())]
-            # ضمان عدم تكرار أسماء الأعمدة
             seen = {}
             unique_cols = []
-            for c in new_cols:
-                seen[c] = seen.get(c, 0) + 1
-                unique_cols.append(c if seen[c] == 1 else f"{c}_{seen[c]}")
+            for j, c in enumerate(df.iloc[idx].tolist()):
+                name = str(c).strip() or f"col_{j}"
+                seen[name] = seen.get(name, 0) + 1
+                unique_cols.append(name if seen[name] == 1 else f"{name}_{seen[name]}")
             df.columns = unique_cols
             df = df.iloc[idx + 1:].reset_index(drop=True)
             break
@@ -112,14 +120,14 @@ def _smart_map_columns(df):
         df = df.rename(columns={best_c: "description"})
 
     if "unit_price" not in df.columns and "price" not in df.columns:
-        num_cols = [c for c in df.columns if c != "description" and pd.to_numeric(df[c], errors="coerce").notna().sum() > len(df) * 0.2]
+        num_cols = [c for c in df.columns if c != "description" and pd.to_numeric(df[c], errors="coerce").notna().sum() > len(df) * 0.15]
         df["unit_price"] = pd.to_numeric(df[num_cols[-1]], errors="coerce").fillna(0.0) if num_cols else 0.0
     return df
 
 def extract_boq(file_bytes, filename, api_key):
     ext = filename.lower().split(".")[-1]
     if ext in ["xlsx", "xls", "docx"]:
-        raw = pd.read_excel(io.BytesIO(file_bytes)) if ext in ["xlsx", "xls"] else _read_word_tables(file_bytes)
+        raw = _read_excel_all_sheets(file_bytes) if ext in ["xlsx", "xls"] else _read_word_tables(file_bytes)
         df = _smart_map_columns(raw)
     else:
         images = []
@@ -186,10 +194,3 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
         desc, u, qty, up, tp = r["description"], r["unit"], r["qty"], r["unit_price"], r["calc_total"]
         gp, gm = 0.0, ""
         if (u == "م.ق" or "مقطوع" in desc) and any(k in desc for k in ["خزان", "حوض", "بيارة"]):
-            nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", desc) if 0.5 <= float(x) <= 25.0]
-            if len(nums) >= 3:
-                L, W, H = nums, nums, nums
-                t = 0.25
-                cv = round((L + 2*t)*(W + 2*t)*(2*t) + 2*(L + W + 2*t)*H*t, 2)
-                ev = round((L + 1.0)*(W + 1.0)*(H + 0.5), 2)
-                gp = round((cv * rc_m3) + (ev * exc_m3), 2)
