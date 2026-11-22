@@ -6,7 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-GEMINI_URL = "https://googleapis.com"
+HOST = "generativelanguage." + "googleapis.com"
+MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
 
 SYNONYMS = {
     "موزايكو": "تيرازو", "موزايك": "تيرازو", "لياسة": "بياض", "قصارة": "بياض",
@@ -48,27 +49,29 @@ def _parse_image_gemini(args):
         "generationConfig": {"response_mime_type": "application/json", "temperature": 0.0}
     }
     last_err = ""
-    for _ in range(3):
+    for mdl in MODELS:
+        endpoint = f"https://{HOST}/v1beta/models/{mdl}:generateContent"
         try:
-            r = requests.post(GEMINI_URL, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=40)
+            r = requests.post(endpoint, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=45)
             if r.status_code == 200:
                 cands = r.json().get("candidates", [])
                 if cands:
-                    parts = cands.get("content", {}).get("parts", [])
+                    parts = cands[0].get("content", {}).get("parts", [])
                     if parts:
-                        data = json.loads(parts.get("text", "{}"))
+                        data = json.loads(parts[0].get("text", "{}"))
                         rows = data if isinstance(data, list) else data.get("rows", [])
                         if rows:
                             return rows
+            elif r.status_code == 404:
+                continue
             elif r.status_code == 429:
                 last_err = "تجاوز حد الطلبات المجاني (429)، انتظر دقيقة"
-                time.sleep(3.0)
+                time.sleep(2.0)
             else:
-                last_err = f"خطأ ({r.status_code}): {r.text[:120]}"
+                last_err = f"خطأ ({r.status_code}): {r.text[:140]}"
                 break
         except Exception as e:
             last_err = str(e)
-            time.sleep(1.0)
     if last_err:
         raise ValueError(last_err)
     return []
