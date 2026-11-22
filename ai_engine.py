@@ -161,7 +161,10 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
     exc_m3 = next((p for d,p,u in zip(g_clean,g_prices,g_units) if u=="?3" and "???" in d and 5<=p<=50), 15.0)
     vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
     g_mat = vec.fit_transform(g_clean)
-    sims = cosine_similarity(vec.transform([clean_ar(d) for d in offer_df["description"].tolist()]), g_mat)
+    try:
+        sims = cosine_similarity(vec.transform([clean_ar(d) or "???" for d in offer_df["description"].tolist()]), g_mat)
+    except Exception:
+        sims = np.zeros((len(offer_df), len(g_clean)))
     mult = 1.0 + (allowance_pct / 100.0)
     gb, ga, gt, dt, dp, mt = [], [], [], [], [], []
     for i, r in offer_df.iterrows():
