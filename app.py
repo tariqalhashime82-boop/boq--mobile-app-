@@ -30,7 +30,11 @@ if st.button("🚀 بدء التحليل والمقارنة الآن", type="pri
         summary_rows, all_details = [], {}
         prog = st.progress(0, text="جاري التحليل عبر الذكاء الاصطناعي...")
         for idx, f in enumerate(offer_files):
-            raw_df = extract_boq(f.getvalue(), f.name, api_key)
+            try:
+                raw_df = extract_boq(f.getvalue(), f.name, api_key)
+            except Exception as err:
+                st.error(f"⚠️ رسالة سيرفر الذكاء الاصطناعي: {err}")
+                st.stop()
             comp_df = compare_with_guide(raw_df, guide_df, allowance)
             all_details[f.name] = comp_df
             math_errs = int((comp_df["math_diff"].abs() > 0.5).sum())
