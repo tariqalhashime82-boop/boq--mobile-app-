@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+openpyxl
+pymupdf
+Pillow
+requests
+scikit-learn
+python-docx
