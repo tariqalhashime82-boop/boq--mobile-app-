@@ -37,12 +37,15 @@ if st.button("🚀 بدء التحليل والمقارنة الآن", type="pri
                 st.stop()
             comp_df = compare_with_guide(raw_df, guide_df, allowance)
             all_details[f.name] = comp_df
-            math_errs = int((comp_df["math_diff"].abs() > 0.5).sum())
+            math_errs = int((pd.to_numeric(comp_df["math_diff"], errors="coerce").abs() > 0.5).sum()) if not comp_df.empty else 0
+            c_tot = float(pd.to_numeric(comp_df["calc_total"], errors="coerce").sum()) if not comp_df.empty else 0.0
+            g_tot = float(pd.to_numeric(comp_df["إجمالي اللائحة"], errors="coerce").sum()) if not comp_df.empty else 0.0
             summary_rows.append({
-                "اسم العرض": f.name, "البنود": len(comp_df),
-                "إجمالي العرض المصحح": round(comp_df["calc_total"].sum(), 2),
-                "إجمالي اللائحة": round(comp_df["إجمالي اللائحة"].sum(), 2),
-                "الفرق %": round(((comp_df["calc_total"].sum() - comp_df["إجمالي اللائحة"].sum()) / max(comp_df["إجمالي اللائحة"].sum(), 1)) * 100, 2),
+                "اسم العرض": f.name,
+                "البنود": int(len(comp_df)),
+                "إجمالي العرض المصحح": round(c_tot, 2),
+                "إجمالي اللائحة": round(g_tot, 2),
+                "الفرق %": round(((c_tot - g_tot) / max(g_tot, 1.0)) * 100.0, 2),
                 "أخطاء حسابية": math_errs
             })
             prog.progress((idx + 1) / len(offer_files), text=f"تمت معالجة: {f.name}")
