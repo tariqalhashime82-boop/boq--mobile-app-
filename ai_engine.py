@@ -77,20 +77,46 @@ def _read_word_tables(file_bytes):
     header = (header + [f"col_{i}" for i in range(mc)])[:mc]
     return pd.DataFrame([(r + [""] * mc)[:mc] for r in data], columns=header)
 
+def _smart_map_columns(df):
+    df = df.dropna(how="all").reset_index(drop=True)
+    # البحث عن صف العناوين الحقيقي إذا كانت الصفوف الأولى عنواناً للمشروع
+    for idx in range(min(10, len(df))):
+        row_str = " ".join(df.iloc[idx].fillna("").astype(str).tolist())
+        if any(w in row_str for w in ["بيان", "وصف", "الأعمال", "الاعمال", "البند", "السعر", "الفئة"]):
+            df.columns = [str(c).strip() for c in df.iloc[idx].tolist()]
+            df = df.iloc[idx + 1:].reset_index(drop=True)
+            break
+
+    df.columns = [str(c).strip() for c in df.columns]
+    cm = {}
+    for c in df.columns:
+        if any(k in c for k in ["رقم", "م", "no", "كود"]) and "description" not in cm.values(): cm[c] = "item_no"
+        elif any(k in c for k in ["بيان", "وصف", "بند", "اعمال", "أعمال", "مواصف", "desc"]): cm[c] = "description"
+        elif any(k in c for k in ["وحدة", "وحده", "unit"]): cm[c] = "unit"
+        elif any(k in c for k in ["كمية", "كميه", "qty"]): cm[c] = "qty"
+        elif any(k in c for k in ["فئة", "فئه", "سعر", "price"]) and "اجمالي" not in c and "إجمالي" not in c: cm[c] = "unit_price"
+        elif any(k in c for k in ["اجمالي", "إجمالي", "قيمة", "قيمه", "total"]): cm[c] = "total_price"
+    df = df.rename(columns=cm)
+
+    # احتياطي ذكي: إذا لم يُكتشف عمود الوصف أو السعر بالاسم، يكتشفه تلقائياً من نوع البيانات
+    if "description" not in df.columns:
+        text_cols = [c for c in df.columns if df[c].astype(str).str.len().mean() > 12]
+        if text_cols:
+            df = df.rename(columns={max(text_cols, key=lambda c: df[c].astype(str).str.len().mean()): "description"})
+        else:
+            df["description"] = df.iloc[:, min(1, len(df.columns)-1)].astype(str)
+
+    if "unit_price" not in df.columns and "price" not in df.columns:
+        num_cols = [c for c in df.columns if pd.to_numeric(df[c], errors="coerce").notna().sum() > len(df) * 0.3]
+        if num_cols:
+            df["unit_price"] = pd.to_numeric(df[num_cols[-1]], errors="coerce").fillna(0.0)
+    return df
+
 def extract_boq(file_bytes, filename, api_key):
     ext = filename.lower().split(".")[-1]
     if ext in ["xlsx", "xls", "docx"]:
-        df = pd.read_excel(io.BytesIO(file_bytes)) if ext in ["xlsx", "xls"] else _read_word_tables(file_bytes)
-        df.columns = [str(c).strip() for c in df.columns]
-        cm = {}
-        for c in df.columns:
-            if any(k in c for k in ["رقم", "م", "no"]): cm[c] = "item_no"
-            elif any(k in c for k in ["بيان", "وصف", "بند", "desc"]): cm[c] = "description"
-            elif any(k in c for k in ["وحدة", "unit"]): cm[c] = "unit"
-            elif any(k in c for k in ["كمية", "qty"]): cm[c] = "qty"
-            elif any(k in c for k in ["فئة", "سعر", "price"]) and "اجمالي" not in c and "إجمالي" not in c: cm[c] = "unit_price"
-            elif any(k in c for k in ["اجمالي", "إجمالي", "قيمة", "total"]): cm[c] = "total_price"
-        df = df.rename(columns=cm)
+        raw = pd.read_excel(io.BytesIO(file_bytes)) if ext in ["xlsx", "xls"] else _read_word_tables(file_bytes)
+        df = _smart_map_columns(raw)
     else:
         images = []
         if ext == "pdf":
@@ -126,16 +152,19 @@ def extract_boq(file_bytes, filename, api_key):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
     df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", next(iter(x.split(".")))) or x)
-    df = df[df["item_no"] != ""].drop_duplicates(subset=["item_no"], keep="first").reset_index(drop=True)
+    df = df[df["description"].str.len() > 2].reset_index(drop=True)
+    if (df["item_no"] != "").sum() > 0:
+        df = df[df["item_no"] != ""].drop_duplicates(subset=["item_no"], keep="first").reset_index(drop=True)
     df["unit"] = df["unit"].apply(norm_unit)
     df["calc_total"] = (df["qty"] * df["unit_price"]).round(2)
     df["math_diff"] = (df["total_price"] - df["calc_total"]).round(2)
     return df
 
 def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
+    guide_df = _smart_map_columns(guide_df.copy())
     g_descs = guide_df["description"].fillna("").astype(str).tolist()
     g_clean = [clean_ar(d) for d in g_descs]
-    p_col = "price" if "price" in guide_df.columns else guide_df.columns[-1]
+    p_col = "price" if "price" in guide_df.columns else ("unit_price" if "unit_price" in guide_df.columns else guide_df.columns[-1])
     g_prices = pd.to_numeric(guide_df[p_col], errors="coerce").fillna(0.0).tolist()
     g_units = [norm_unit(u) for u in guide_df["unit"].fillna("").astype(str).tolist()] if "unit" in guide_df.columns else [""] * len(g_descs)
 
@@ -154,7 +183,7 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
         if (u == "م.ق" or "مقطوع" in desc) and any(k in desc for k in ["خزان", "حوض", "بيارة"]):
             nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", desc) if 0.5 <= float(x) <= 25.0]
             if len(nums) >= 3:
-                L, W, H = nums[0], nums[1], nums[2]
+                L, W, H = nums, nums, nums
                 t = 0.25
                 cv = round((L + 2*t)*(W + 2*t)*(2*t) + 2*(L + W + 2*t)*H*t, 2)
                 ev = round((L + 1.0)*(W + 1.0)*(H + 0.5), 2)
@@ -169,20 +198,3 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
             bj = int(np.argmax(rs))
             if rs[bj] >= 0.16 and g_prices[bj] > 0:
                 gp = round(g_prices[bj], 2)
-                gm = f"{g_descs[bj][:45]} ({int(rs[bj]*100)}%)"
-
-        if gp == 0.0 and up > 0:
-            gp = round(up * 0.92, 2)
-            gm = "تقدير سوق محلي"
-
-        gpa = round(gp * mult, 2)
-        g_tot = round(gpa * qty, 2)
-        d_tot = round(tp - g_tot, 2)
-        gb.append(gp); ga.append(gpa); gt.append(g_tot); dt.append(d_tot)
-        dp.append(round((d_tot / g_tot * 100), 1) if g_tot > 0 else 0.0)
-        mt.append(gm)
-
-    out = offer_df.copy()
-    out["سعر اللائحة"], out["اللائحة + العلاوة"], out["إجمالي اللائحة"] = gb, ga, gt
-    out["الفرق (د.ل)"], out["نسبة الفرق %"], out["البند المطابق باللائحة"] = dt, dp, mt
-    return out
