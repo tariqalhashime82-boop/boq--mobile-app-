@@ -58,7 +58,7 @@ def _get_models(api_key):
                 return ms[:4]
     except Exception:
         pass
-    return ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-3-flash-preview"]
+    return ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
 def _parse_image_gemini(args):
     idx, img_bytes, api_key = args
     b64 = base64.b64encode(img_bytes).decode("utf-8")
