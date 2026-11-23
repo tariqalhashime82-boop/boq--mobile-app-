@@ -1,141 +1,203 @@
-import io
+import os, io, re, json, base64, time, requests
 import pandas as pd
-import streamlit as st
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from ai_engine import extract_boq, compare_with_guide, read_excel_all_sheets
+import numpy as np
+from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-st.set_page_config(page_title="منظومة تسعير ومقارنة العروض 2026", page_icon="🏗️", layout="centered")
-st.markdown("<style>.stApp { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
+HOST = "generativelanguage." + "googleapis.com"
 
-st.title("🏗️ منظومة تسعير ومقارنة العروض 2026")
-st.caption("إعداد وتصميم: المهندس طارق محمد الهاشمي | حسب اللائحة الاسترشادية لسنة 2026")
+SYNONYMS = {
+    "موزايكو": "تيرازو", "موزايك": "تيرازو", "لياسة": "بياض", "قصارة": "بياض",
+    "سملات": "ميدة", "شناجات": "ميدة", "رقاب": "أعمدة", "شمعات": "أعمدة",
+    "بلوك": "طوب", "ياجور": "طوب", "ممبرين": "لفافات بيتومين", "زفت": "بيتومين",
+    "فلين": "بوليسترين", "بولي سترين": "بوليسترين", "صوف صخري": "عزل حراري",
+    "حلق": "إطار", "درفة": "ضلفة", "ردم": "دفان", "انابيب": "مواسير",
+    "بلاط": "ارضيات", "سيراميك": "ارضيات", "بورسلين": "ارضيات"
+}
 
-api_key = st.secrets.get("GEMINI_API_KEY", "") or st.text_input("🔑 مفتاح Gemini API:", type="password")
-allowance = st.number_input("📍 علاوة المنطقة (%):", min_value=0.0, max_value=100.0, value=0.0, step=5.0)
-guide_file = st.file_uploader("📘 ملف اللائحة الاسترشادية 2026 (Excel):", type=["xlsx", "xls"])
-offer_files = st.file_uploader("📂 ارفع العروض أو صوّر المقايسة (PDF / Excel / Word / صور):", type=["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx"], accept_multiple_files=True)
+def clean_ar(text):
+    s = str(text)
+    for a, b in [("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ة", "ه"), ("ى", "ي")]:
+        s = s.replace(a, b)
+    for w in ["بالمتر المربع", "بالمتر الطولي", "بالمتر المكعب", "بالمقطوعية", "توريد وعمل", "توريد وصب", "حسب المواصفات"]:
+        s = s.replace(w, " ")
+    for k, v in SYNONYMS.items():
+        if k in s:
+            s += f" {v}"
+    return re.sub(r"\s+", " ", s).strip()
 
-def style_sheet(ws, add_totals=False, sum_cols=None):
-    ws.views.sheetView[0].rightToLeft = True
-    hdr_fill = PatternFill("solid", fgColor="1B4F72")
-    hdr_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
-    tot_fill = PatternFill("solid", fgColor="D6EAF8")
-    tot_font = Font(name="Arial", size=11, bold=True, color="000000")
-    body_font = Font(name="Arial", size=10)
-    thin = Side(border_style="thin", color="BDC3C7")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+def norm_unit(u):
+    s = str(u).strip().replace(" ", "")
+    if any(k in s for k in ["2", "٢", "مربع", "مسطح"]):
+        return "م2"
+    if any(k in s for k in ["3", "٣", "مكعب"]):
+        return "م3"
+    if any(k in s for k in ["ط", "ml", "طولي"]):
+        return "م.ط"
+    if any(k in s for k in ["ق", "ls", "مقطوع"]):
+        return "م.ق"
+    return s if s else "عدد"
 
-    for cell in ws[1]:
-        cell.fill = hdr_fill
-        cell.font = hdr_font
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = border
-    ws.row_dimensions[1].height = 28
+def classify_work_group(desc):
+    d = clean_ar(desc)
+    if any(k in d for k in ["ازاله", "حفر", "ردم", "دفان", "احلال", "تسويه", "تمهيد"]):
+        return "1. الأعمال التمهيدية والحفر والردم"
+    if any(k in d for k in ["خرسانه", "اساسات", "قواعد", "ميده", "اعمده", "اسقف", "كمرات", "حديد", "شدة"]):
+        return "2. أعمال الخرسانات العادية والمسلحة"
+    if any(k in d for k in ["طوب", "مباني", "بلوك", "حوائط", "قواطيع"]):
+        return "3. أعمال المباني"
+    if any(k in d for k in ["عزل", "بيتومين", "لفافات", "بوليسترين", "رطوبه", "حراري"]):
+        return "4. أعمال العزل المائي والحراري"
+    if any(k in d for k in ["بياض", "لياسه", "دهان", "طلاء", "ارضيات", "بلاط", "سيراميك", "تيرازو", "رخام", "جبس"]):
+        return "5. أعمال البياض والأرضيات والدهانات"
+    if any(k in d for k in ["ابواب", "نوافذ", "الومنيوم", "خشب", "حديد مشغول", "حمايه", "درابزين"]):
+        return "6. أعمال النجارة والألومنيوم والحديد"
+    if any(k in d for k in ["مواسير", "صحي", "سباكه", "خزان", "صرف", "تغذيه", "مرحاض", "مغسله", "مضخه"]):
+        return "7. الأعمال الصحية والسباكة"
+    if any(k in d for k in ["كهرباء", "كابل", "اسلاك", "اناره", "لوحه", "مفتاح", "بريزه", "تكييف"]):
+        return "8. الأعمال الكهربائية والميكانيكية"
+    return "9. أعمال متنوعة وتكميلية"
 
-    max_r = ws.max_row
-    for r in range(2, max_r + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
-            cell.font = body_font
-            cell.border = border
-            cell.alignment = Alignment(horizontal="right" if c in (2, 3, ws.max_column) else "center", vertical="center", wrap_text=True)
-            if isinstance(cell.value, (int, float)):
-                cell.number_format = "#,##0.00"
+def _get_models(api_key):
+    try:
+        r = requests.get(f"https://{HOST}/v1beta/models?key={api_key.strip()}", timeout=15)
+        if r.status_code == 200:
+            ms = [m["name"].replace("models/", "") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", []) and "gemini" in m.get("name", "") and not any(x in m.get("name", "") for x in ["tts", "audio", "image", "robotics", "embedding", "aqa"])]
+            if ms:
+                return ms
+    except Exception:
+        pass
+    return ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
 
-    if add_totals and max_r >= 2 and sum_cols:
-        tr = max_r + 1
-        ws.cell(row=tr, column=1, value="المجموع الكلي").font = tot_font
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=tr, column=c)
-            cell.fill = tot_fill
-            cell.font = tot_font
-            cell.border = border
-            if c in sum_cols:
-                col_ltr = get_column_letter(c)
-                cell.value = f"=SUM({col_ltr}2:{col_ltr}{max_r})"
-                cell.number_format = "#,##0.00"
-
-    for col in ws.columns:
-        ltr = get_column_letter(col[0].column)
-        max_len = max((len(str(cell.value or "")) for cell in col), default=10)
-        ws.column_dimensions[ltr].width = min(max(max_len + 4, 12), 45)
-
-if st.button("🚀 بدء التحليل والمقارنة الآن", type="primary", use_container_width=True):
-    if not api_key:
-        st.error("يرجى إدخال مفتاح Gemini API أولاً.")
-    elif not guide_file or not offer_files:
-        st.warning("يرجى رفع ملف اللائحة وعرض سعر واحد على الأقل.")
-    else:
-        guide_df = read_excel_all_sheets(guide_file.getvalue())
-        summary_rows, all_details, group_tables = [], {}, []
-        prog = st.progress(0, text="جاري التحليل عبر الذكاء الاصطناعي...")
-        for idx, f in enumerate(offer_files):
+def _parse_image_gemini(args):
+    idx, img_bytes, api_key = args
+    b64 = base64.b64encode(img_bytes).decode("utf-8")
+    prompt = 'Extract all BOQ table rows from this page accurately including handwritten prices. Ignore sub-total or grand-total summary rows. Return JSON only: {"rows": [{"no": "1", "desc": "item description in Arabic", "unit": "m2", "qty": 100, "price": 50, "total": 5000}]}'
+    payload = {
+        "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
+        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.0}
+    }
+    last_err = ""
+    for mdl in _get_models(api_key):
+        endpoint = f"https://{HOST}/v1beta/models/{mdl}:generateContent"
+        for attempt in range(2):
             try:
-                raw_df = extract_boq(f.getvalue(), f.name, api_key)
-                comp_df = compare_with_guide(raw_df, guide_df, allowance)
-            except Exception as err:
-                st.error(f"⚠️ تنبيه أثناء قراءة الملف ({f.name}): {err}")
-                st.stop()
+                r = requests.post(endpoint, headers={"x-goog-api-key": api_key.strip()}, json=payload, timeout=50)
+                if r.status_code == 200:
+                    cands = r.json().get("candidates", [])
+                    if cands:
+                        parts = cands[0].get("content", {}).get("parts", [])
+                        if parts:
+                            data = json.loads(parts[0].get("text", "{}"))
+                            rows = data if isinstance(data, list) else next((v for v in data.values() if isinstance(v, list)), [])
+                            if rows:
+                                return rows
+                    break
+                elif r.status_code == 503:
+                    last_err = f"ضغط مؤقت على {mdl}، أعد المحاولة"
+                    time.sleep(2.5)
+                elif r.status_code in (400, 404):
+                    break
+                elif r.status_code == 429:
+                    last_err = "تجاوز حد الطلبات المجاني (429)، انتظر دقيقة"
+                    time.sleep(3.0)
+                else:
+                    last_err = f"خطأ ({r.status_code}): {r.text[:120]}"
+                    break
+            except Exception as e:
+                last_err = str(e)
+                break
+    if last_err:
+        raise ValueError(last_err)
+    return []
 
-            ar_df = comp_df.rename(columns={
-                "item_no": "رقم البند",
-                "description": "بيان الأعمال",
-                "unit": "الوحدة",
-                "qty": "الكمية",
-                "unit_price": "سعر العرض",
-                "total_price": "إجمالي العرض المسجل",
-                "calc_total": "إجمالي العرض المدقق",
-                "math_diff": "الفرق الحسابي"
-            })
-            cols_order = ["رقم البند", "مجموعة الأعمال", "بيان الأعمال", "الوحدة", "الكمية", "سعر العرض", "إجمالي العرض المسجل", "إجمالي العرض المدقق", "الفرق الحسابي", "سعر اللائحة", "اللائحة + العلاوة", "إجمالي اللائحة", "الفرق (د.ل)", "نسبة الفرق %", "البند المطابق باللائحة"]
-            ar_df = ar_df[[c for c in cols_order if c in ar_df.columns]]
-            all_details[f.name] = ar_df
+def _read_word_tables(file_bytes):
+    from docx import Document
+    doc = Document(io.BytesIO(file_bytes))
+    all_rows = [[c.text.strip().replace("\n", " ") for c in row.cells] for t in doc.tables for row in t.rows if len(row.cells) >= 3]
+    if not all_rows:
+        return pd.DataFrame()
+    header, data = all_rows[0], all_rows[1:]
+    mc = max(len(r) for r in data)
+    header = (header + [f"col_{i}" for i in range(mc)])[:mc]
+    return pd.DataFrame([(r + [""] * mc)[:mc] for r in data], columns=header)
 
-            if not ar_df.empty:
-                grp = ar_df.groupby("مجموعة الأعمال", as_index=False)[["إجمالي العرض المدقق", "إجمالي اللائحة", "الفرق (د.ل)"]].sum()
-                grp["نسبة الفرق %"] = ((grp["الفرق (د.ل)"] / grp["إجمالي اللائحة"].replace(0, 1)) * 100).round(2)
-                grp.insert(0, "اسم العرض", f.name)
-                group_tables.append(grp)
+def read_excel_all_sheets(file_bytes):
+    xl = pd.ExcelFile(io.BytesIO(file_bytes))
+    frames = []
+    for sh in xl.sheet_names:
+        sub = xl.parse(sh, header=None).dropna(how="all")
+        if not sub.empty and len(sub.columns) >= 2:
+            sub = _smart_map_columns(sub)
+            if not sub.empty:
+                frames.append(sub)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-            math_errs = int((pd.to_numeric(comp_df["math_diff"], errors="coerce").abs() > 0.5).sum()) if not comp_df.empty else 0
-            c_tot = float(pd.to_numeric(comp_df["calc_total"], errors="coerce").sum()) if not comp_df.empty else 0.0
-            g_tot = float(pd.to_numeric(comp_df["إجمالي اللائحة"], errors="coerce").sum()) if not comp_df.empty else 0.0
-            summary_rows.append({
-                "اسم العرض": f.name,
-                "عدد البنود": int(len(comp_df)),
-                "إجمالي العرض المدقق (د.ل)": round(c_tot, 2),
-                "إجمالي اللائحة (د.ل)": round(g_tot, 2),
-                "الفرق الكلي (د.ل)": round(c_tot - g_tot, 2),
-                "نسبة الفرق %": round(((c_tot - g_tot) / max(g_tot, 1.0)) * 100.0, 2),
-                "أخطاء حسابية": math_errs
-            })
-            prog.progress((idx + 1) / len(offer_files), text=f"تمت معالجة: {f.name}")
+def _smart_map_columns(df):
+    df = df.dropna(how="all").reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame(columns=["item_no", "description", "unit", "qty", "unit_price", "total_price"])
+    for idx in range(min(25, len(df))):
+        row_str = " ".join(df.iloc[idx].fillna("").astype(str).tolist())
+        if any(w in row_str for w in ["بيان", "وصف", "الأعمال", "الاعمال", "البند", "السعر", "الفئة", "مواصفات"]):
+            seen, ucols = {}, []
+            for j, c in enumerate(df.iloc[idx].tolist()):
+                nm = str(c).strip() or f"col_{j}"
+                seen[nm] = seen.get(nm, 0) + 1
+                ucols.append(nm if seen[nm] == 1 else f"{nm}_{seen[nm]}")
+            df.columns = ucols
+            df = df.iloc[idx + 1:].reset_index(drop=True)
+            break
+    df.columns = [str(c).strip() for c in df.columns]
+    cm = {}
+    for c in df.columns:
+        if any(k in c for k in ["رقم", "م", "no", "كود"]) and "item_no" not in cm.values():
+            cm[c] = "item_no"
+        elif any(k in c for k in ["بيان", "وصف", "بند", "اعمال", "أعمال", "مواصف", "desc"]) and "description" not in cm.values():
+            cm[c] = "description"
+        elif any(k in c for k in ["وحدة", "وحده", "unit"]) and "unit" not in cm.values():
+            cm[c] = "unit"
+        elif any(k in c for k in ["كمية", "كميه", "qty"]) and "qty" not in cm.values():
+            cm[c] = "qty"
+        elif any(k in c for k in ["فئة", "فئه", "سعر", "price"]) and "اجمالي" not in c and "إجمالي" not in c and "unit_price" not in cm.values():
+            cm[c] = "unit_price"
+        elif any(k in c for k in ["اجمالي", "إجمالي", "قيمة", "قيمه", "total"]) and "total_price" not in cm.values():
+            cm[c] = "total_price"
+    df = df.rename(columns=cm)
+    if "description" not in df.columns:
+        best_c = max(df.columns, key=lambda c: df[c].fillna("").astype(str).str.len().mean())
+        df = df.rename(columns={best_c: "description"})
+    if "unit_price" not in df.columns and "price" not in df.columns:
+        num_cols = [c for c in df.columns if c != "description" and pd.to_numeric(df[c], errors="coerce").notna().sum() > len(df) * 0.15]
+        df["unit_price"] = pd.to_numeric(df[num_cols[-1]], errors="coerce").fillna(0.0) if num_cols else 0.0
+    return df
 
-        sum_df = pd.DataFrame(summary_rows).sort_values("إجمالي العرض المدقق (د.ل)")
-        st.subheader("🏆 ترتيب العروض والتدقيق الحسابي")
-        st.dataframe(sum_df, use_container_width=True, hide_index=True)
-
-        all_groups_df = pd.concat(group_tables, ignore_index=True) if group_tables else pd.DataFrame()
-        if not all_groups_df.empty:
-            st.subheader("📊 مجموع بنود الأعمال (مقارنة الأقسام باللائحة)")
-            st.dataframe(all_groups_df, use_container_width=True, hide_index=True)
-
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            sum_df.to_excel(writer, sheet_name="الترتيب والتدقيق", index=False)
-            style_sheet(writer.sheets["الترتيب والتدقيق"], add_totals=False)
-
-            if not all_groups_df.empty:
-                all_groups_df.to_excel(writer, sheet_name="مجموع بنود الأعمال", index=False)
-                style_sheet(writer.sheets["مجموع بنود الأعمال"], add_totals=True, sum_cols=[3, 4, 5])
-
-            for name, df_det in all_details.items():
-                sh_name = name[:28].replace(":", "").replace("/", "")
-                df_det.to_excel(writer, sheet_name=sh_name, index=False)
-                style_sheet(writer.sheets[sh_name], add_totals=True, sum_cols=[7, 8, 9, 12, 13])
-
-        st.download_button("📥 تحميل التقرير الشامل المنسق (Excel)", data=buf.getvalue(), file_name="تقرير_مقارنة_العروض_2026.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-        for name, df_det in all_details.items():
-            with st.expander(f"📋 تفاصيل بنود: {name}"):
-                st.dataframe(df_det, use_container_width=True, hide_index=True)
+def extract_boq(file_bytes, filename, api_key):
+    ext = filename.lower().split(".")[-1]
+    if ext in ["xlsx", "xls"]:
+        df = read_excel_all_sheets(file_bytes)
+    elif ext == "docx":
+        df = _smart_map_columns(_read_word_tables(file_bytes))
+    else:
+        images = []
+        if ext == "pdf":
+            import fitz
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            for i in range(len(doc)):
+                im = Image.open(io.BytesIO(doc.load_page(i).get_pixmap(dpi=120).tobytes("png"))).convert("RGB")
+                if max(im.size) > 1400:
+                    im.thumbnail((1400, 1400))
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=78)
+                images.append((i, buf.getvalue(), api_key))
+        else:
+            im = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+            if max(im.size) > 1400:
+                im.thumbnail((1400, 1400))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=78)
+            images.append((0, buf.getvalue(), api_key))
+        rows = []
+        with ThreadPoolExecutor(max_workers=3) as ex:
