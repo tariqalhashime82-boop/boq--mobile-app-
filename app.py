@@ -128,12 +128,11 @@ if st.button("🚀 بدء التحليل والمقارنة الآن", type="pri
 
             if not all_groups_df.empty:
                 all_groups_df.to_excel(writer, sheet_name="مجموع بنود الأعمال", index=False)
-                style_sheet(writer.sheets["مجموع بنود الأعمال"], add_totals=True, sum_cols=)
-
+                style_sheet(writer.sheets["مجموع بنود الأعمال"], add_totals=True, sum_cols=(3, 4, 5))
             for name, df_det in all_details.items():
                 sh_name = name[:28].replace(":", "").replace("/", "")
                 df_det.to_excel(writer, sheet_name=sh_name, index=False)
-                style_sheet(writer.sheets[sh_name], add_totals=True, sum_cols=)
+                style_sheet(writer.sheets[sh_name], add_totals=True, sum_cols=(7, 8, 9, 12, 13))
 
         st.download_button("📥 تحميل التقرير الشامل المنسق (Excel)", data=buf.getvalue(), file_name="تقرير_مقارنة_العروض_2026.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         for name, df_det in all_details.items():
