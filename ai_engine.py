@@ -201,3 +201,94 @@ def extract_boq(file_bytes, filename, api_key):
             images.append((0, buf.getvalue(), api_key))
         rows = []
         with ThreadPoolExecutor(max_workers=3) as ex:
+            for res in ex.map(_parse_image_gemini, images):
+                if res:
+                    rows.extend(res)
+        df = pd.DataFrame(rows).rename(columns={"no": "item_no", "desc": "description", "price": "unit_price", "total": "total_price"})
+    for col in ["item_no", "description", "unit"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    for col in ["qty", "unit_price", "total_price"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", str(x).split(".")[0]) or str(x))
+    df = df[~df["description"].str.contains("إجمالي|اجمالي|المجموع|ينقل|ما قبله", regex=True, na=False)]
+    df = df[df["description"].str.len() > 2].reset_index(drop=True)
+    if (df["item_no"] != "").sum() > 2:
+        df = df[df["item_no"] != ""].drop_duplicates(subset=["item_no"], keep="first").reset_index(drop=True)
+    df["unit"] = df["unit"].apply(norm_unit)
+    df["calc_total"] = (df["qty"] * df["unit_price"]).round(2)
+    df["math_diff"] = (df["total_price"] - df["calc_total"]).round(2)
+    df["مجموعة الأعمال"] = df["description"].apply(classify_work_group)
+    return df
+
+def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
+    cols = ["item_no", "مجموعة الأعمال", "description", "unit", "qty", "unit_price", "total_price", "calc_total", "math_diff", "سعر اللائحة", "اللائحة + العلاوة", "إجمالي اللائحة", "الفرق (د.ل)", "نسبة الفرق %", "البند المطابق باللائحة"]
+    if offer_df is None or offer_df.empty:
+        return pd.DataFrame(columns=cols)
+    if "description" not in guide_df.columns:
+        guide_df = _smart_map_columns(guide_df.copy())
+    desc_col = "description" if "description" in guide_df.columns else guide_df.columns[0]
+    g_descs = guide_df[desc_col].fillna("").astype(str).tolist()
+    g_clean = [clean_ar(d) for d in g_descs]
+    p_col = "price" if "price" in guide_df.columns else ("unit_price" if "unit_price" in guide_df.columns else guide_df.columns[-1])
+    g_prices = pd.to_numeric(guide_df[p_col], errors="coerce").fillna(0.0).tolist()
+    g_units = [norm_unit(u) for u in guide_df["unit"].fillna("").astype(str).tolist()] if "unit" in guide_df.columns else [""] * len(g_descs)
+
+    valid = [(d, c, p, u) for d, c, p, u in zip(g_descs, g_clean, g_prices, g_units) if len(c) > 2 and p > 0]
+    if valid:
+        g_descs, g_clean, g_prices, g_units = map(list, zip(*valid))
+
+    rc_m3 = next((p for d, p, u in zip(g_clean, g_prices, g_units) if u == "م3" and "خرسانه مسلحه" in d and p > 150), 280.0)
+    exc_m3 = next((p for d, p, u in zip(g_clean, g_prices, g_units) if u == "م3" and "حفر" in d and 5 <= p <= 50), 15.0)
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
+    g_mat = vec.fit_transform(g_clean) if g_clean else None
+    try:
+        sims = cosine_similarity(vec.transform([clean_ar(d) or "بند" for d in offer_df["description"].tolist()]), g_mat) if g_mat is not None else np.zeros((len(offer_df), 1))
+    except Exception:
+        sims = np.zeros((len(offer_df), max(len(g_clean), 1)))
+    mult = 1.0 + (allowance_pct / 100.0)
+    gb, ga, gt, dt, dp, mt = [], [], [], [], [], []
+    for i, r in offer_df.iterrows():
+        desc, u, qty, up, tp = r["description"], r["unit"], r["qty"], r["unit_price"], r["calc_total"]
+        gp, gm = 0.0, ""
+        if (u == "م.ق" or "مقطوع" in desc) and any(k in desc for k in ["خزان", "حوض", "بيارة"]):
+            nums = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)", desc) if 0.5 <= float(x) <= 25.0]
+            if len(nums) >= 3:
+                L, W, H = nums[0], nums[1], nums[2]
+                t = 0.25
+                cv = round((L + 2*t)*(W + 2*t)*(2*t) + 2*(L + W + 2*t)*H*t, 2)
+                ev = round((L + 1.0)*(W + 1.0)*(H + 0.5), 2)
+                gp = round((cv * rc_m3) + (ev * exc_m3), 2)
+                gm = f"حساب خرسانة الخزان ({cv} م3 × {rc_m3} + حفر)"
+        if gp == 0.0 and g_prices:
+            rs = sims[i].copy()
+            for j in range(len(rs)):
+                if g_units[j] and u and g_units[j] != u:
+                    rs[j] *= 0.45
+            bj = int(np.argmax(rs))
+            if rs[bj] >= 0.12 and g_prices[bj] > 0:
+                gp = round(g_prices[bj], 2)
+                gm = f"{g_descs[bj][:45]} ({int(rs[bj]*100)}%)"
+        if gp == 0.0 and up > 0:
+            gp = round(up * 0.92, 2)
+            gm = "تقدير سوق محلي (غير مدرج)"
+        gpa = round(gp * mult, 2)
+        g_tot = round(gpa * qty, 2)
+        d_tot = round(tp - g_tot, 2)
+        gb.append(gp)
+        ga.append(gpa)
+        gt.append(g_tot)
+        dt.append(d_tot)
+        dp.append(round((d_tot / g_tot * 100), 1) if g_tot > 0 else 0.0)
+        mt.append(gm)
+    out = offer_df.copy()
+    out["سعر اللائحة"] = gb
+    out["اللائحة + العلاوة"] = ga
+    out["إجمالي اللائحة"] = gt
+    out["الفرق (د.ل)"] = dt
+    out["نسبة الفرق %"] = dp
+    out["البند المطابق باللائحة"] = mt
+    return out
