@@ -17,7 +17,7 @@ guide_file = st.file_uploader("📘 ملف اللائحة الاسترشادية
 offer_files = st.file_uploader("📂 ارفع العروض أو صوّر المقايسة (PDF / Excel / Word / صور):", type=["pdf", "png", "jpg", "jpeg", "xlsx", "xls", "docx"], accept_multiple_files=True)
 
 def style_sheet(ws, add_totals=False, sum_cols=None):
-    ws.views.sheetView.rightToLeft = True
+    ws.views.sheetView[0].rightToLeft = True
     hdr_fill = PatternFill("solid", fgColor="1B4F72")
     hdr_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
     tot_fill = PatternFill("solid", fgColor="D6EAF8")
