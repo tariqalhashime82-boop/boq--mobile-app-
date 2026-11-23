@@ -214,11 +214,10 @@ def extract_boq(file_bytes, filename, api_key):
             df[col] = 0.0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     df["item_no"] = df["item_no"].apply(lambda x: re.sub(r"[^0-9]", "", str(x).split(".")[0]) or str(x))
-    df = df[~df["description"].str.contains("إجمالي|اجمالي|المجموع|ينقل|ما قبله", regex=True, na=False)]
-    df = df[df["description"].str.len() > 2].reset_index(drop=True)
+    df = df[~df["description"].str.contains("إجمالي|اجمالي|المجموع|مجموع|ينقل|ما قبله|تابع", regex=True, na=False)]
+    df = df[(df["description"].str.len() > 3) & (df["qty"] > 0) & (df["unit_price"] > 0)].reset_index(drop=True)
     if (df["item_no"] != "").sum() > 2:
         df = df[df["item_no"] != ""].drop_duplicates(subset=["item_no"], keep="first").reset_index(drop=True)
-    df["unit"] = df["unit"].apply(norm_unit)
     df["calc_total"] = (df["qty"] * df["unit_price"]).round(2)
     df["math_diff"] = (df["total_price"] - df["calc_total"]).round(2)
     df["مجموعة الأعمال"] = df["description"].apply(classify_work_group)
@@ -267,9 +266,9 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
             rs = sims[i].copy()
             for j in range(len(rs)):
                 if g_units[j] and u and g_units[j] != u:
-                    rs[j] *= 0.45
+                    rs[j] *= 0.25
             bj = int(np.argmax(rs))
-            if rs[bj] >= 0.12 and g_prices[bj] > 0:
+            if rs[bj] >= 0.22 and g_prices[bj] > 0:
                 gp = round(g_prices[bj], 2)
                 gm = f"{g_descs[bj][:45]} ({int(rs[bj]*100)}%)"
         if gp == 0.0 and up > 0:
