@@ -183,25 +183,30 @@ def extract_boq(file_bytes, filename, api_key):
     else:
         images = []
         if ext == "pdf":
-            import fitz
+            import fitz, gc
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             for i in range(len(doc)):
-                im = Image.open(io.BytesIO(doc.load_page(i).get_pixmap(dpi=120).tobytes("png"))).convert("RGB")
-                if max(im.size) > 1400:
-                    im.thumbnail((1400, 1400))
+                im = Image.open(io.BytesIO(doc.load_page(i).get_pixmap(dpi=95).tobytes("png"))).convert("RGB")
+                if max(im.size) > 1100:
+                    im.thumbnail((1100, 1100))
                 buf = io.BytesIO()
-                im.save(buf, format="JPEG", quality=78)
+                im.save(buf, format="JPEG", quality=72)
                 images.append((i, buf.getvalue(), api_key))
+                del im
+            doc.close()
+            gc.collect()
         else:
             im = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-            if max(im.size) > 1400:
-                im.thumbnail((1400, 1400))
+            if max(im.size) > 1100:
+                im.thumbnail((1100, 1100))
             buf = io.BytesIO()
-            im.save(buf, format="JPEG", quality=78)
+            im.save(buf, format="JPEG", quality=72)
             images.append((0, buf.getvalue(), api_key))
         rows = []
-        with ThreadPoolExecutor(max_workers=3) as ex:
+        with ThreadPoolExecutor(max_workers=2) as ex:
             for res in ex.map(_parse_image_gemini, images):
+                if res:
+                    rows.extend(res)
                 if res:
                     rows.extend(res)
         df = pd.DataFrame(rows).rename(columns={"no": "item_no", "desc": "description", "price": "unit_price", "total": "total_price"})
@@ -291,3 +296,4 @@ def compare_with_guide(offer_df, guide_df, allowance_pct=0.0):
     out["نسبة الفرق %"] = dp
     out["البند المطابق باللائحة"] = mt
     return out
+
